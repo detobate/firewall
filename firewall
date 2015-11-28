@@ -1,0 +1,124 @@
+#!/bin/bash
+
+# Disable IP Forwarding whilst we setup
+echo 0 > /proc/sys/net/ipv4/ip_forward
+# Flush and delete any existing rules and tables
+iptables -F
+iptables -t nat -F
+iptables -X
+
+LAN_IFACE="em1"
+WAN_IFACE="p2p1"
+VPN_IFACE="tun0"
+LAN_SUBNET="192.168.0.0/24"
+VPN_SUBNET="10.8.0.0/8"
+DMZ_SERVER=""
+TCP_IN="22 80 32400"
+UDP_IN="32400 1194"
+TCP_DMZ=""
+UDP_DMZ=""
+
+#######################
+# OUTBOUND LAN-WAN
+#######################
+iptables -N LAN-WAN
+iptables -A LAN-WAN -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A LAN-WAN -s $LAN_SUBNET -m state --state NEW -j ACCEPT
+iptables -A LAN-WAN -j DROP
+
+#######################
+# INBOUND TABLE WAN-LAN
+#######################
+iptables -N WAN-LAN
+iptables -A WAN-LAN -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# TCP ports allowed
+if [[ -n ${TCP_DMZ+1} ]]; then
+	for i in $TCP_DMZ; do
+		iptables -A WAN-LAN -m state --state NEW -p tcp --dport $i -j DNAT --to $DMZ_SERVER
+	done
+fi
+
+# UDP ports allowed
+if [[ -n ${UDP_DMZ+1} ]]; then
+	for i in $UDP_DMZ; do
+		iptables -A WAN-LAN -m state --state NEW -p udp --dport $i -j DNAT --to $DMZ_SERVER
+	done
+fi
+iptables -A WAN-LAN -j DROP
+
+#######################
+# OUTBOUND VPN-WAN
+#######################
+iptables -N VPN-WAN
+iptables -A VPN-WAN -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A VPN-WAN -m state --state NEW -j ACCEPT
+iptables -A VPN-WAN -j DROP
+
+#######################
+# OUTBOUND VPN-LAN
+#######################
+iptables -N VPN-LAN
+iptables -A VPN-LAN -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A VPN-LAN -s $VPN_SUBNET -d $LAN_SUBNET -m state --state NEW -j ACCEPT
+iptables -A VPN-LAN -j DROP
+
+#######################
+# INBOUND TABLE LAN-VPN
+#######################
+iptables -N LAN-VPN
+iptables -A LAN-VPN -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A LAN-VPN -j DROP
+
+#######################
+# INBOUND TABLE WAN-VPN
+#######################
+iptables -N WAN-VPN
+iptables -A WAN-VPN -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A WAN-VPN -j DROP
+
+#####################
+# INPUT RULES
+#####################
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A INPUT -p icmp -j ACCEPT
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -m state --state new -i $LAN_IFACE -s $LAN_SUBNET -j ACCEPT
+iptables -A INPUT -m state --state new -i $VPN_IFACE -s $VPN_SUBNET -j ACCEPT
+
+# TCP ports allowed
+if [[ -n "${TCP_IN+1}" ]]; then
+	for i in $TCP_IN; do
+		iptables -A INPUT -m state --state NEW -p tcp --dport $i -j ACCEPT
+	done
+fi
+
+# UDP ports allowed
+if [[ -n "${UDP_IN+1}" ]]; then
+	for i in $UDP_IN; do
+		iptables -A INPUT -m state --state NEW -p udp --dport $i -j ACCEPT
+	done
+fi
+
+iptables -A INPUT -m state --state NEW -j DROP
+
+####################
+# OUTPUT RULES
+####################
+iptables -A OUTPUT -j ACCEPT
+
+# Setup Forwarding tables
+iptables -A FORWARD -i $LAN_IFACE -o $WAN_IFACE -j LAN-WAN
+iptables -A FORWARD -i $WAN_IFACE -o $LAN_IFACE -j WAN-LAN
+iptables -A FORWARD -i $LAN_IFACE -o $VPN_IFACE -j LAN-VPN
+iptables -A FORWARD -i $VPN_IFACE -o $LAN_IFACE -j VPN-LAN
+iptables -A FORWARD -i $VPN_IFACE -o $WAN_IFACE -j VPN-WAN
+iptables -A FORWARD -i $WAN_IFACE -o $VPN_IFACE -j WAN-VPN
+iptables -A FORWARD -j DROP
+
+# Enable postrouting SNAT/MASQ
+iptables -t nat -A POSTROUTING -o $WAN_IFACE -j MASQUERADE
+iptables -t nat -A POSTROUTING -s $VPN_SUBNET -o $LAN_IFACE -j MASQUERADE
+
+# Re-enable IP forwarding
+echo 1 > /proc/sys/net/ipv4/ip_forward

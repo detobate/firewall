@@ -1,0 +1,87 @@
+#!/bin/bash
+
+# Flush and delete any existing rules and tables
+ip6tables -F
+ip6tables -X
+
+LAN_IFACE="em1"
+WAN_IFACE="p2p1"
+LAN_SUBNET=""
+DMZ_SERVER=""
+TCP_IN="22 80"
+UDP_IN="1194"
+TCP_DMZ=""
+UDP_DMZ=""
+
+#######################
+# OUTBOUND LAN-WAN
+#######################
+ip6tables -N LAN-WAN
+ip6tables -A LAN-WAN -m state --state ESTABLISHED,RELATED -j ACCEPT
+ip6tables -A LAN-WAN -m state --state NEW -j ACCEPT
+ip6tables -A LAN-WAN -j DROP
+
+#######################
+# INBOUND TABLE WAN-LAN
+#######################
+ip6tables -N WAN-LAN
+ip6tables -A WAN-LAN -m state --state ESTABLISHED,RELATED -j ACCEPT
+ip6tables -A WAN-LAN -p icmpv6 -j ACCEPT
+
+# Allow IPSec
+ip6tables -A WAN-LAN --protocol esp -m ipv6header --header ah,esp -j ACCEPT
+ip6tables -A WAN-LAN --protocol udp --sport 500 --dport 500 -j ACCEPT
+
+# TCP ports allowed
+if [[ -n ${TCP_DMZ+1} ]]; then
+	for i in $TCP_DMZ; do
+		ip6tables -A WAN-LAN -m state --state NEW -p tcp --dport $i -d $DMZ_SERVER -j ACCEPT
+	done
+fi
+
+# UDP ports allowed
+if [[ -n ${UDP_DMZ+1} ]]; then
+	for i in $UDP_DMZ; do
+		ip6tables -A WAN-LAN -m state --state NEW -p udp --dport $i -d $DMZ_SERVER -j ACCEPT
+	done
+fi
+ip6tables -A WAN-LAN -j DROP
+
+
+#####################
+# INPUT RULES
+#####################
+ip6tables -A INPUT -i lo -j ACCEPT
+ip6tables -A INPUT -p icmpv6 -j ACCEPT
+ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+ip6tables -A INPUT -m state --state new -i $LAN_IFACE -j ACCEPT
+
+# Allow DHCPv6 in from WAN
+ip6tables -A INPUT -i $WAN_IFACE -p udp --dport 546 --sport 547 -j ACCEPT
+
+# TCP ports allowed
+if [[ -n ${TCP_IN+1} ]]; then
+	for i in $TCP_IN; do
+		ip6tables -A INPUT -m state --state NEW -p tcp --dport $i -j ACCEPT
+	done
+fi
+
+# UDP ports allowed
+if [[ -n ${UDP_IN+1} ]]; then
+	for i in $UDP_IN; do
+		ip6tables -A INPUT -m state --state NEW -p udp --dport $i -j ACCEPT
+	done
+fi
+
+ip6tables -A INPUT -m state --state NEW -j DROP
+
+####################
+# OUTPUT RULES
+####################
+ip6tables -A OUTPUT -j ACCEPT
+
+# Setup Forwarding tables
+ip6tables -A FORWARD -i $LAN_IFACE -o $WAN_IFACE -j LAN-WAN
+ip6tables -A FORWARD -i $WAN_IFACE -o $LAN_IFACE -j WAN-LAN
+ip6tables -A FORWARD -j DROP
+
